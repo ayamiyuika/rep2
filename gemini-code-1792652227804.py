@@ -1,14 +1,3 @@
-import subprocess
-import sys
-
-# 必要なライブラリを強制的にインストールする処理
-for pkg in ["beautifulsoup4", "requests", "pandas"]:
-    try:
-        __import__(pkg if pkg != "beautifulsoup4" else "bs4")
-    except ImportError:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
-
-# --- ここから下は通常のコード ---
 import streamlit as st
 import pandas as pd
 import requests
