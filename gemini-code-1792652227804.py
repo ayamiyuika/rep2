@@ -57,24 +57,29 @@ def analyze_review_text(text, score_val):
         sentiment = "ネガティブ"
     return category_str, sentiment
 
-# 標準ライブラリのみで楽天トラベルを取得・解析
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_rakuten_reviews(hotel_name, hotel_id, max_pages):
+# 楽天トラベル収集関数（進捗コールバック対応）
+def fetch_rakuten_reviews_with_progress(hotel_name, hotel_id, max_pages, progress_bar, status_text):
     reviews_data = []
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
     for page in range(1, max_pages + 1):
+        # 進行状況のテキストとバーを更新
+        current_progress = (page - 1) / max_pages
+        progress_bar.progress(current_progress)
+        status_text.info(f"⏳ **[{page}/{max_pages} ページ目を巡回中...]** 楽天トラベルからデータを取得・解析しています（現在 {len(reviews_data)} 件抽出済）")
+
         url = f"https://travel.rakuten.co.jp/HOTEL/{hotel_id}/review.html" if page == 1 else f"https://travel.rakuten.co.jp/HOTEL/{hotel_id}/review_p{page}.html"
+        
         try:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=10) as response:
                 html = response.read().decode('euc-jp', errors='ignore')
 
-            # 各口コミブロックを抽出
             boxes = re.findall(r'(<(?:div|dl)[^>]*class="[^"]*commentBox[^"]*"[\s\S]*?</(?:div|dl)>)', html)
             if not boxes:
+                status_text.warning(f"ℹ️ {page}ページ目以降の口コミが見つからなかったため、収集を終了しました。")
                 break
 
             for box in boxes:
@@ -114,13 +119,18 @@ def fetch_rakuten_reviews(hotel_name, hotel_id, max_pages):
                     "分類": cat,
                     "本文": body
                 })
-            time.sleep(1)
-        except Exception:
+
+            time.sleep(1) # サーバー負荷防止のウェイト
+        except Exception as e:
+            status_text.error(f"⚠️ {page}ページ目の取得中にエラーが発生しました: {e}")
             break
 
+    # 完了状態の更新
+    progress_bar.progress(1.0)
+    status_text.success(f"✅ 収集完了！ 合計 **{len(reviews_data)} 件** の口コミを取得・分析しました。")
     return pd.DataFrame(reviews_data)
 
-# --- UI構築 ---
+# --- 2. サイドバーUI ---
 st.sidebar.title("🏨 都ホテルズ 口コミ巡回")
 
 selected_hotel = st.sidebar.selectbox("対象ホテルを選択", list(HOTEL_DICT.keys()))
@@ -137,22 +147,35 @@ date_range = st.sidebar.date_input(
     max_value=datetime.date.today()
 )
 
+# セッション状態の管理
 if "current_df" not in st.session_state:
     st.session_state.current_df = pd.DataFrame()
 if "loaded_hotel" not in st.session_state:
     st.session_state.loaded_hotel = ""
 
-if fetch_button:
-    with st.spinner(f"楽天トラベルを巡回中...（{selected_hotel}）"):
-        df_fetched = fetch_rakuten_reviews(selected_hotel, HOTEL_DICT[selected_hotel], pages_to_fetch)
-        st.session_state.current_df = df_fetched
-        st.session_state.loaded_hotel = selected_hotel
-
+# --- 3. メイン画面 ---
 st.title(f"【{selected_hotel}】 楽天トラベル口コミ分析")
+
+# ボタンが押されたら進行状況UIを表示して処理開始
+if fetch_button:
+    st.markdown("### 📡 データ収集ステータス")
+    progress_bar = st.progress(0.0)
+    status_text = st.empty()
+
+    df_fetched = fetch_rakuten_reviews_with_progress(
+        selected_hotel, 
+        HOTEL_DICT[selected_hotel], 
+        pages_to_fetch, 
+        progress_bar, 
+        status_text
+    )
+    st.session_state.current_df = df_fetched
+    st.session_state.loaded_hotel = selected_hotel
+
 df = st.session_state.current_df
 
 if df.empty or st.session_state.loaded_hotel != selected_hotel:
-    st.info("👈 左側のサイドバーにある **「楽天トラベルから口コミを収集」** ボタンを押してデータを取得してください。")
+    st.info("👈 左側のサイドバーにある **「楽天トラベルから口コミを収集」** ボタンを押すと収集が開始されます。")
 else:
     s_date, e_date = date_range if len(date_range) == 2 else (date_range[0], datetime.date.today())
     filtered_df = df[(df["投稿日"] >= s_date) & (df["投稿日"] <= e_date)].sort_values(by="投稿日", ascending=False)
@@ -165,6 +188,7 @@ else:
         pos_count = (filtered_df["感情判定"] == "ポジティブ").sum()
         pos_rate = round((pos_count / total_count) * 100, 1)
 
+        st.markdown("---")
         c1, c2, c3 = st.columns(3)
         c1.metric("収集口コミ件数", f"{total_count} 件")
         c2.metric("平均評価スコア", f"{avg_score} / 5.0")
